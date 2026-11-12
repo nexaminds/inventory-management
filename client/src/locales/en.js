@@ -6,6 +6,7 @@ export default {
     orders: 'Orders',
     finance: 'Finance',
     demandForecast: 'Demand Forecast',
+    restocking: 'Restocking',
     companyName: 'Catalyst Components',
     subtitle: 'Inventory Management System'
   },
@@ -106,6 +107,12 @@ export default {
     title: 'Orders',
     description: 'View and manage customer orders',
     allOrders: 'All Orders',
+    submittedOrders: 'Submitted Orders',
+    submittedOrdersEmpty: 'No restocking orders have been submitted yet',
+    submittedTable: {
+      leadTime: 'Lead Time (days)',
+      totalCost: 'Total Cost'
+    },
     totalOrders: 'Total Orders',
     totalRevenue: 'Total Revenue',
     avgOrderValue: 'Avg Order Value',
@@ -204,9 +211,40 @@ export default {
     shipped: 'Shipped',
     processing: 'Processing',
     backordered: 'Backordered',
+    submitted: 'Submitted',
     inStock: 'In Stock',
     lowStock: 'Low Stock',
     adequate: 'Adequate'
+  },
+
+  // Restocking
+  restocking: {
+    title: 'Restocking',
+    description: 'Plan a restocking order within your budget, prioritized by demand trend',
+    budget: 'Budget',
+    allocated: 'Allocated',
+    remaining: 'Remaining',
+    itemsToOrder: 'Items to Order',
+    budgetSlider: 'Restocking budget',
+    recommendations: 'Recommended Purchases',
+    noSuggestions: 'No restocking is needed: forecasted demand does not exceed current demand',
+    noneAffordable: 'The current budget is too low to purchase any items',
+    placeOrder: 'Place Order',
+    placing: 'Placing order...',
+    partial: 'Partial',
+    orderPlaced: 'Order {orderNumber} was placed. Expected delivery: {date}.',
+    viewOrders: 'View submitted orders',
+    orderFailed: 'Failed to place order',
+    loadFailed: 'Failed to load restocking data',
+    table: {
+      item: 'Item',
+      trend: 'Trend',
+      suggestedQty: 'Suggested Qty',
+      recommendedQty: 'Recommended Qty',
+      unitCost: 'Unit Cost',
+      lineTotal: 'Line Total',
+      leadTime: 'Lead Time (days)'
+    }
   },
 
   // Trends

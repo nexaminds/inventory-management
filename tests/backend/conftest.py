@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 server_path = Path(__file__).parent.parent.parent / "server"
 sys.path.insert(0, str(server_path))
 
+import main
 from main import app
 
 
@@ -19,6 +20,27 @@ def client():
     """Create a test client for the FastAPI application."""
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture(autouse=True)
+def reset_restocking_orders():
+    """Clear the in-memory restocking order store so tests stay independent."""
+    main.restocking_orders.clear()
+    yield
+    main.restocking_orders.clear()
+
+
+@pytest.fixture(autouse=True)
+def reset_tasks_and_purchase_orders():
+    """Restore in-memory task and purchase order stores so tests stay independent."""
+    # purchase_orders is seeded from JSON, so snapshot and restore rather than clear
+    original_pos = list(main.purchase_orders)
+    main.tasks.clear()
+    main.task_sequence = 0
+    yield
+    main.tasks.clear()
+    main.task_sequence = 0
+    main.purchase_orders[:] = original_pos
 
 
 @pytest.fixture
