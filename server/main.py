@@ -1,3 +1,5 @@
+import threading
+from datetime import date, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
@@ -89,6 +91,8 @@ class DemandForecast(BaseModel):
     forecasted_demand: int
     trend: str
     period: str
+    unit_cost: float
+    lead_time_days: int
 
 class BacklogItem(BaseModel):
     id: str
@@ -117,8 +121,65 @@ class CreatePurchaseOrderRequest(BaseModel):
     supplier_name: str
     quantity: int
     unit_cost: float
-    expected_delivery_date: str
+    # Typed as date so malformed values are rejected with a 422 instead of being
+    # stored and later rendered as "N/A" in the UI
+    expected_delivery_date: date
     notes: Optional[str] = None
+
+class RestockingOrderItem(BaseModel):
+    item_sku: str
+    item_name: str
+    quantity: int
+    unit_cost: float
+    lead_time_days: int
+
+class CreateRestockingOrderRequest(BaseModel):
+    budget: float
+    items: List[RestockingOrderItem]
+
+class RestockingOrder(BaseModel):
+    id: str
+    order_number: str
+    items: List[RestockingOrderItem]
+    total_cost: float
+    budget: float
+    status: str
+    order_date: str
+    lead_time_days: int
+    expected_delivery: str
+
+# Submitted restocking orders live in memory only: they reset whenever the server
+# restarts, consistent with the rest of the mock data (no database).
+restocking_orders: List[dict] = []
+# Sync routes run in a threadpool, so guard sequence allocation + append to keep
+# order numbers unique under concurrent submits.
+restocking_orders_lock = threading.Lock()
+
+# Purchase orders reuse the list loaded from purchase_orders.json, so new POs are
+# visible to /api/backlog's has_purchase_order flag. Same in-memory caveat as above.
+purchase_orders_lock = threading.Lock()
+
+class Task(BaseModel):
+    id: str
+    title: str
+    priority: str
+    # camelCase matches the client's mock tasks in useAuth.js, which are merged
+    # with API tasks into one list in App.vue
+    dueDate: str
+    status: str
+
+class CreateTaskRequest(BaseModel):
+    title: str
+    priority: str = "medium"
+    # Parsed as a date for validation; stored and returned as an ISO string.
+    # Past dates are allowed: an overdue task is a legitimate state.
+    dueDate: date
+
+# User-created tasks, in memory only. IDs are prefixed strings so they never
+# collide with the numeric IDs of the client-side mock tasks.
+tasks: List[dict] = []
+tasks_lock = threading.Lock()
+task_sequence = 0
 
 # API endpoints
 @app.get("/")
@@ -178,6 +239,147 @@ def get_backlog():
         item_dict["has_purchase_order"] = has_po
         result.append(item_dict)
     return result
+
+@app.get("/api/restocking-orders", response_model=List[RestockingOrder])
+def get_restocking_orders():
+    """Get submitted restocking orders, newest first"""
+    return list(reversed(restocking_orders))
+
+@app.post("/api/restocking-orders", response_model=RestockingOrder, status_code=201)
+def create_restocking_order(request: CreateRestockingOrderRequest):
+    """Submit a restocking order built from demand forecast recommendations"""
+    if not request.items:
+        raise HTTPException(status_code=400, detail="Order must contain at least one item")
+
+    forecasts_by_sku = {f["item_sku"]: f for f in demand_forecasts}
+    items = []
+    for item in request.items:
+        if item.quantity <= 0:
+            raise HTTPException(status_code=400, detail=f"Quantity for {item.item_sku} must be greater than 0")
+        forecast = forecasts_by_sku.get(item.item_sku)
+        if not forecast:
+            raise HTTPException(status_code=400, detail=f"Unknown SKU {item.item_sku}")
+        # Price and lead time come from server data, not the client, so a client
+        # cannot under-report cost to slip an order under its budget.
+        items.append({
+            "item_sku": item.item_sku,
+            "item_name": forecast["item_name"],
+            "quantity": item.quantity,
+            "unit_cost": forecast["unit_cost"],
+            "lead_time_days": forecast["lead_time_days"],
+        })
+
+    total_cost = round(sum(i["quantity"] * i["unit_cost"] for i in items), 2)
+    if total_cost > request.budget:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Order total {total_cost:.2f} exceeds budget {request.budget:.2f}"
+        )
+
+    # The order arrives complete only when its slowest item does
+    lead_time_days = max(i["lead_time_days"] for i in items)
+    order_date = date.today()
+    with restocking_orders_lock:
+        sequence = len(restocking_orders) + 1
+        order = {
+            "id": f"rst-{sequence}",
+            "order_number": f"RST-{sequence:04d}",
+            "items": items,
+            "total_cost": total_cost,
+            "budget": request.budget,
+            "status": "Submitted",
+            "order_date": order_date.isoformat(),
+            "lead_time_days": lead_time_days,
+            "expected_delivery": (order_date + timedelta(days=lead_time_days)).isoformat(),
+        }
+        restocking_orders.append(order)
+    return order
+
+@app.post("/api/purchase-orders", response_model=PurchaseOrder, status_code=201)
+def create_purchase_order(request: CreatePurchaseOrderRequest):
+    """Create a purchase order to cover an inventory shortage (backlog item)"""
+    if request.quantity <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be greater than 0")
+    if request.unit_cost <= 0:
+        raise HTTPException(status_code=400, detail="Unit cost must be greater than 0")
+    if not request.supplier_name.strip():
+        raise HTTPException(status_code=400, detail="Supplier name is required")
+    if request.expected_delivery_date < date.today():
+        raise HTTPException(status_code=400, detail="Expected delivery date cannot be in the past")
+    if not any(b["id"] == request.backlog_item_id for b in backlog_items):
+        raise HTTPException(status_code=404, detail="Backlog item not found")
+
+    with purchase_orders_lock:
+        # One PO per backlog item: the dashboard shows a single Create/View PO button per row
+        if any(po["backlog_item_id"] == request.backlog_item_id for po in purchase_orders):
+            raise HTTPException(status_code=409, detail="A purchase order already exists for this backlog item")
+        po = {
+            "id": f"po-{len(purchase_orders) + 1}",
+            "backlog_item_id": request.backlog_item_id,
+            "supplier_name": request.supplier_name.strip(),
+            "quantity": request.quantity,
+            "unit_cost": request.unit_cost,
+            "expected_delivery_date": request.expected_delivery_date.isoformat(),
+            "status": "Pending",
+            "created_date": date.today().isoformat(),
+            "notes": request.notes,
+        }
+        purchase_orders.append(po)
+    return po
+
+@app.get("/api/purchase-orders/{backlog_item_id}", response_model=PurchaseOrder)
+def get_purchase_order_by_backlog_item(backlog_item_id: str):
+    """Get the purchase order created for a backlog item"""
+    for po in purchase_orders:
+        if po["backlog_item_id"] == backlog_item_id:
+            return po
+    raise HTTPException(status_code=404, detail="Purchase order not found")
+
+@app.get("/api/tasks", response_model=List[Task])
+def get_tasks():
+    """Get user-created tasks, newest first"""
+    return list(reversed(tasks))
+
+@app.post("/api/tasks", response_model=Task, status_code=201)
+def create_task(request: CreateTaskRequest):
+    """Create a task"""
+    global task_sequence
+    if not request.title.strip():
+        raise HTTPException(status_code=400, detail="Title is required")
+    if request.priority not in ("high", "medium", "low"):
+        raise HTTPException(status_code=400, detail="Priority must be high, medium, or low")
+    with tasks_lock:
+        # Monotonic counter (not len()) so IDs are never reused after a delete
+        task_sequence += 1
+        task = {
+            "id": f"task-{task_sequence}",
+            "title": request.title.strip(),
+            "priority": request.priority,
+            "dueDate": request.dueDate.isoformat(),
+            "status": "pending",
+        }
+        tasks.append(task)
+    return task
+
+@app.delete("/api/tasks/{task_id}")
+def delete_task(task_id: str):
+    """Delete a task"""
+    with tasks_lock:
+        for i, task in enumerate(tasks):
+            if task["id"] == task_id:
+                tasks.pop(i)
+                return {"deleted": task_id}
+    raise HTTPException(status_code=404, detail="Task not found")
+
+@app.patch("/api/tasks/{task_id}", response_model=Task)
+def toggle_task(task_id: str):
+    """Toggle a task between pending and completed"""
+    with tasks_lock:
+        for task in tasks:
+            if task["id"] == task_id:
+                task["status"] = "completed" if task["status"] == "pending" else "pending"
+                return task
+    raise HTTPException(status_code=404, detail="Task not found")
 
 @app.get("/api/dashboard/summary")
 def get_dashboard_summary(

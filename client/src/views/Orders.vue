@@ -29,6 +29,41 @@
 
       <div class="card">
         <div class="card-header">
+          <h3 class="card-title">{{ t('orders.submittedOrders') }} ({{ restockingOrders.length }})</h3>
+        </div>
+        <div v-if="restockingOrders.length === 0" class="empty-state">{{ t('orders.submittedOrdersEmpty') }}</div>
+        <div v-else class="table-container">
+          <table class="orders-table">
+            <thead>
+              <tr>
+                <th class="col-order-number">{{ t('orders.table.orderNumber') }}</th>
+                <th class="col-date">{{ t('orders.table.orderDate') }}</th>
+                <th class="col-items">{{ t('orders.table.items') }}</th>
+                <th class="col-value">{{ t('orders.submittedTable.totalCost') }}</th>
+                <th class="col-date">{{ t('orders.submittedTable.leadTime') }}</th>
+                <th class="col-date">{{ t('orders.table.expectedDelivery') }}</th>
+                <th class="col-status">{{ t('orders.table.status') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="ro in restockingOrders" :key="ro.id">
+                <td class="col-order-number"><strong>{{ ro.order_number }}</strong></td>
+                <td class="col-date">{{ formatDate(ro.order_date) }}</td>
+                <td class="col-items">{{ t('orders.itemsCount', { count: ro.items.length }) }}</td>
+                <td class="col-value"><strong>{{ formatCost(ro.total_cost) }}</strong></td>
+                <td class="col-date">{{ ro.lead_time_days }}</td>
+                <td class="col-date">{{ formatDate(ro.expected_delivery) }}</td>
+                <td class="col-status">
+                  <span class="badge info">{{ t('status.submitted') }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
           <h3 class="card-title">{{ t('orders.allOrders') }} ({{ orders.length }})</h3>
         </div>
         <div class="table-container">
@@ -83,6 +118,7 @@ import { ref, onMounted, watch, computed } from 'vue'
 import { api } from '../api'
 import { useFilters } from '../composables/useFilters'
 import { useI18n } from '../composables/useI18n'
+import { formatCurrencyWithDecimals } from '../utils/currency'
 
 export default {
   name: 'Orders',
@@ -95,6 +131,7 @@ export default {
     const loading = ref(true)
     const error = ref(null)
     const orders = ref([])
+    const restockingOrders = ref([])
 
     // Use shared filters
     const {
@@ -109,7 +146,16 @@ export default {
       try {
         loading.value = true
         const filters = getCurrentFilters()
-        const fetchedOrders = await api.getOrders(filters)
+        // Restocking orders are not affected by the global filters. A failure there
+        // falls back to an empty list so it can't take down the main orders table.
+        const [fetchedOrders, fetchedRestocking] = await Promise.all([
+          api.getOrders(filters),
+          api.getRestockingOrders().catch(err => {
+            console.error('Failed to load restocking orders:', err)
+            return []
+          })
+        ])
+        restockingOrders.value = fetchedRestocking
 
         // Sort orders by order_date (earliest first)
         orders.value = fetchedOrders.sort((a, b) => {
@@ -146,12 +192,18 @@ export default {
     const formatDate = (dateString) => {
       const { currentLocale } = useI18n()
       const locale = currentLocale.value === 'ja' ? 'ja-JP' : 'en-US'
-      return new Date(dateString).toLocaleDateString(locale, {
+      // Date-only strings ("2026-11-12", used by restocking orders) are parsed by
+      // new Date() as UTC midnight, which renders as the previous day in US time
+      // zones. Appending a time makes them parse as local midnight instead.
+      const normalized = /^\d{4}-\d{2}-\d{2}$/.test(dateString) ? `${dateString}T00:00:00` : dateString
+      return new Date(normalized).toLocaleDateString(locale, {
         year: 'numeric',
         month: 'short',
         day: 'numeric'
       })
     }
+
+    const formatCost = (amount) => formatCurrencyWithDecimals(amount, currentCurrency.value, 2)
 
     onMounted(loadOrders)
 
@@ -160,6 +212,8 @@ export default {
       loading,
       error,
       orders,
+      restockingOrders,
+      formatCost,
       getOrdersByStatus,
       getOrderStatusClass,
       formatDate,
@@ -201,6 +255,12 @@ export default {
 
 .col-value {
   width: 120px;
+}
+
+.empty-state {
+  padding: 2rem;
+  text-align: center;
+  color: #64748b;
 }
 
 /* Items details styling */
